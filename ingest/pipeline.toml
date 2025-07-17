@@ -1,0 +1,17 @@
+[meta]
+version = "v1"
+start = 1718582400  # June 17, 2025 00:00:00 UTC
+end = "now"
+
+[storage]
+prefix = "./data"
+flush = true
+
+[sacct]
+window = 300  # 5 minutes = 300 seconds
+fields = [
+  "JobID", "User", "JobName", "Partition", "State",
+  "Elapsed", "TotalCPU", "MaxRSS", "ReqMem", "NCPUS"
+]
+states = ["COMPLETED", "FAILED", "TIMEOUT", "CANCELLED", "RUNNING"]
+delimiter = "|"
