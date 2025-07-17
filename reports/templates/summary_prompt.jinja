@@ -1,0 +1,18 @@
+# Weekly HPC Job Summary
+**Generated:** {{ generated }}
+
+- Total Jobs: {{ summary.total_jobs }}
+- Users Active: {{ summary.by_user | length }}
+- Partitions Used: {{ summary.by_partition.keys() | list }}
+
+{% for user in summary.users %}
+- **{{ user.User }}**: {{ user.JobID }} jobs, {{ user.CPUHours }} CPU hours
+{% endfor %}
+
+{% for part, count in summary.by_partition.items() %}
+- {{ part }}: {{ count }} jobs
+{% endfor %}
+
+{% for state, count in summary.by_state.items() %}
+- {{ state }}: {{ count }} jobs
+{% endfor %}
