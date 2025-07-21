@@ -1,17 +1,25 @@
-import subprocess
+import time
 import json
 import toml
-import time
-from datetime import datetime
-from kafka import KafkaProducer
+import logging
+import dateparser
 from pathlib import Path
+from datetime import datetime, timedelta
+import subprocess
+import argparse
+
+logging.basicConfig()
+log = logging.getLogger("extractor")
+
 
 def load_config(path):
     return toml.load(path)
 
+
 def run_sacct(start_ts, end_ts, fields, states, delimiter):
     start_fmt = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%dT%H:%M:%S")
     end_fmt = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%dT%H:%M:%S")
+
     cmd = [
         "sacct",
         "--duplicate",
@@ -24,58 +32,81 @@ def run_sacct(start_ts, end_ts, fields, states, delimiter):
         "--endtime", end_fmt,
         "--state", ",".join(states)
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return result.stdout.strip().split("\n")
 
-def parse_records(lines, fields, delimiter):
-    return [dict(zip(fields, line.split(delimiter))) for line in lines if line.strip()]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"sacct failed: {result.stderr.strip()}")
+    
+    lines = result.stdout.strip().split("\n")
+    return [line.split(delimiter) for line in lines if line]
 
-def send_to_kafka(producer, topic, records):
-    for rec in records:
-        producer.send(topic, json.dumps(rec).encode("utf-8"))
-    producer.flush()
 
 def main():
-    config = load_config("ingest/pipeline.toml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--configfile", required=True)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+
+    log.setLevel(args.log_level.upper())
+    config = load_config(args.configfile)
+
     meta = config["meta"]
-    storage = config["storage"]
+    store = config["storage"]
     sacct_cfg = config["sacct"]
 
-    # Tracking file for NEXT_START
-    prefix = Path(storage["prefix"])
-    version = meta["version"]
-    next_start_path = prefix / f"NEXT_START_{version}.txt"
-    prefix.mkdir(parents=True, exist_ok=True)
+    # Parse start and end from TOML (support "now", "now-7days", etc.)
+    start_val = meta["start"]
+    end_val = meta["end"]
 
-    if next_start_path.exists():
-        start_ts = int(next_start_path.read_text().strip())
+    if isinstance(start_val, str):
+        start_ts = int(dateparser.parse(start_val).timestamp())
     else:
-        start_ts = meta["start"]
-        next_start_path.write_text(str(start_ts))
+        start_ts = int(start_val)
 
-    end = meta["end"]
-    end_ts = int(time.time()) if end == "now" else int(end)
+    if isinstance(end_val, str):
+        if end_val.lower() == "now":
+            end_ts = int(time.time())
+        else:
+            end_ts = int(dateparser.parse(end_val).timestamp())
+    else:
+        end_ts = int(end_val)
 
-    window = sacct_cfg["window"]
+    version = meta.get("version", "v1")
+    outdir = Path(store.get("prefix", "./data")) / "run" / f"version={version}"
+    outdir.mkdir(parents=True, exist_ok=True)
+    outfile = outdir / "sacct.ndjson"
+    statefile = outdir / "NEXT_START"
+
+    if statefile.exists():
+        with open(statefile) as f:
+            start_ts = int(f.read().strip())
+
+    window = int(sacct_cfg.get("window", 300))
     fields = sacct_cfg["fields"]
     states = sacct_cfg["states"]
-    delimiter = sacct_cfg["delimiter"]
+    delimiter = sacct_cfg.get("delimiter", "|")
 
-    producer = KafkaProducer(bootstrap_servers="localhost:9092")  # adjust if needed
+    log.info(f"Saving to: {outfile}")
+    log.info(f"Starting at: {datetime.fromtimestamp(start_ts)}")
 
-    while start_ts < end_ts:
-        chunk_end = min(start_ts + window, end_ts)
-        print(f"Processing {start_ts} to {chunk_end}...")
-        try:
-            lines = run_sacct(start_ts, chunk_end, fields, states, delimiter)
-            records = parse_records(lines, fields, delimiter)
-            send_to_kafka(producer, "sacct-raw", records)
-            print(f"Sent {len(records)} records to Kafka")
-            next_start_path.write_text(str(chunk_end + 1))
-        except subprocess.CalledProcessError as e:
-            print(f"Error: {e}")
-            break
-        start_ts = chunk_end + 1
+    with open(outfile, "a") as f:
+        while start_ts < end_ts:
+            next_ts = start_ts + window
+            log.info(f"Processing {start_ts} to {next_ts}...")
+            try:
+                rows = run_sacct(start_ts, next_ts, fields, states, delimiter)
+                for row in rows:
+                    data = dict(zip(fields, row))
+                    json.dump(data, f)
+                    f.write("\n")
+                log.info(f"Wrote {len(rows)} records")
+            except Exception as e:
+                log.warning(f"Skipping window due to error: {e}")
+            start_ts = next_ts
+            with open(statefile, "w") as s:
+                s.write(str(start_ts))
+
 
 if __name__ == "__main__":
     main()
+

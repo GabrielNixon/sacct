@@ -1,50 +1,43 @@
-import json
-from kafka import KafkaConsumer
-import pandas as pd
 import os
+import json
+import pandas as pd
+from pathlib import Path
 from datetime import datetime
-import pyarrow as pa
-import pyarrow.parquet as pq
 
-DATA_DIR = "storage/delta"
+INPUT_PATH = "data/run/version=v1/sacct.ndjson"
+OUTPUT_BASE = "storage/delta"
 
-def write_parquet_batch(records, batch_id):
-    if not records:
+def load_ndjson(path):
+    with open(path, "r") as f:
+        for line in f:
+            yield json.loads(line)
+
+def write_partitioned_parquet(records):
+    df = pd.DataFrame(records)
+    if df.empty:
+        print("No records found.")
         return
 
-    df = pd.DataFrame(records)
+    # You can use another field like 'Submit' or 'Start' if JobID isn't timestamp-based
+    if 'Submit' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['Submit'], errors='coerce')
+    else:
+        df['timestamp'] = pd.Timestamp.utcnow()  # fallback if needed
 
-    # Convert timestamps for partitioning (e.g., by day)
-    df['date'] = pd.to_datetime(df['JobID'].str.extract(r'(\d+)')[0], errors='coerce', unit='s').dt.date
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    output_path = os.path.join(DATA_DIR, f"date={date_str}")
-    os.makedirs(output_path, exist_ok=True)
+    df['date'] = df['timestamp'].dt.date.astype(str)
 
-    file_path = os.path.join(output_path, f"sacct_batch_{batch_id}.parquet")
-    table = pa.Table.from_pandas(df)
-    pq.write_table(table, file_path)
-    print(f"Wrote {len(df)} records to {file_path}")
+    for date, group in df.groupby("date"):
+        output_dir = os.path.join(OUTPUT_BASE, f"date={date}")
+        os.makedirs(output_dir, exist_ok=True)
+        file_path = os.path.join(output_dir, f"part-{datetime.utcnow().timestamp():.0f}.parquet")
+        group.drop(columns=["date", "timestamp"], errors="ignore").to_parquet(file_path)
+        print(f" Wrote {len(group)} records to {file_path}")
 
-def consume():
-    consumer = KafkaConsumer(
-        "sacct-raw",
-        bootstrap_servers="localhost:9092",
-        auto_offset_reset="earliest",
-        enable_auto_commit=True,
-        group_id="sacct-consumers",
-        value_deserializer=lambda x: json.loads(x.decode("utf-8"))
-    )
-
-    buffer = []
-    batch_size = 1000
-    batch_id = 0
-
-    for message in consumer:
-        buffer.append(message.value)
-        if len(buffer) >= batch_size:
-            write_parquet_batch(buffer, batch_id)
-            buffer.clear()
-            batch_id += 1
+def main():
+    print(f" Reading from {INPUT_PATH}...")
+    records = list(load_ndjson(INPUT_PATH))
+    write_partitioned_parquet(records)
 
 if __name__ == "__main__":
-    co
+    main()
+

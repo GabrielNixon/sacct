@@ -1,0 +1,6 @@
+# Ignore data and delta outputs
+data/
+storage/delta/
+*.ndjson
+*.parquet
+*.md

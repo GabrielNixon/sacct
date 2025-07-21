@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import pandas as pd
 from datetime import datetime, timedelta
@@ -42,7 +43,13 @@ def summarize_jobs(df):
     summary["by_state"] = df.groupby("State")["JobID"].count().to_dict()
 
     df["Elapsed"] = pd.to_timedelta(df["Elapsed"], errors='coerce')
-    df["CPUHours"] = (df["Elapsed"].dt.total_seconds() / 3600) * df.get("NCPUS", 1)
+    # Clean and convert columns
+    df["Elapsed"] = pd.to_timedelta(df["Elapsed"], errors='coerce')
+    df["NCPUS"] = pd.to_numeric(df["NCPUS"], errors="coerce").fillna(1)
+
+# Compute CPU hours safely
+    df["CPUHours"] = (df["Elapsed"].dt.total_seconds() / 3600) * df["NCPUS"]
+
 
     usage = df.groupby("User").agg({
         "JobID": "count",
@@ -63,7 +70,7 @@ def save_report(markdown):
     os.makedirs("reports", exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
         f.write(markdown)
-    print(f"✅ Weekly report saved to {OUTPUT_PATH}")
+    print("Weekly report saved to", OUTPUT_PATH)
 
 def main():
     df = load_last_7_days()

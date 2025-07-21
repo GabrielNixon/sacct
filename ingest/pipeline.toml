@@ -1,6 +1,6 @@
 [meta]
 version = "v1"
-start = 1718582400  # June 17, 2025 00:00:00 UTC
+start = "now-7days"
 end = "now"
 
 [storage]
